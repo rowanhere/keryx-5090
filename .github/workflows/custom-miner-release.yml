@@ -51,16 +51,13 @@ jobs:
               cd miner-src
               git checkout v0.3.7-OPoI
               git apply ../patches/pom-gpu-loop-optimization.patch
-              cat >> Cargo.toml <<EOF
-
-[profile.fast-release]
-inherits = "release"
-lto = false
-codegen-units = 32
-incremental = true
-debug = 0
-strip = "symbols"
-EOF
+              printf "\n[profile.fast-release]\n" >> Cargo.toml
+              printf "inherits = \"release\"\n" >> Cargo.toml
+              printf "lto = false\n" >> Cargo.toml
+              printf "codegen-units = 32\n" >> Cargo.toml
+              printf "incremental = true\n" >> Cargo.toml
+              printf "debug = 0\n" >> Cargo.toml
+              printf "strip = \"symbols\"\n" >> Cargo.toml
               cargo build --profile fast-release -p keryx-miner --timings
             '
 
