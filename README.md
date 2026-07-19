@@ -29,6 +29,23 @@ cd /root/keryx-5090-miner-pack
 ./run-light.sh
 ```
 
+## Custom Patched Miner
+
+The custom release applies `patches/pom-gpu-loop-optimization.patch` to the official miner source
+and builds a Linux binary with `KERYX_POM_BATCH` support.
+
+```bash
+curl -L -o keryx-5090-custom-miner.zip \
+  https://github.com/rowanhere/keryx-5090/releases/latest/download/keryx-5090-custom-miner-linux-amd64.zip
+
+rm -rf /root/keryx-5090-custom-miner
+mkdir -p /root/keryx-5090-custom-miner
+unzip -q keryx-5090-custom-miner.zip -d /root/keryx-5090-custom-miner
+cd /root/keryx-5090-custom-miner
+
+KERYX_POM_BATCH=8388608 ./run-light.sh
+```
+
 For the most aggressive preset:
 
 ```bash
