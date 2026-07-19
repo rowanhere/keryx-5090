@@ -49,7 +49,7 @@ jobs:
               cd miner-src
               git checkout v0.3.7-OPoI
               git apply ../patches/pom-gpu-loop-optimization.patch
-              cargo build --release
+              cargo build --release -p keryx-miner -p keryxcuda
             '
 
       - name: Package
