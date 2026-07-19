@@ -145,3 +145,29 @@ index a3c0827..366d532 100644
              self.t_count,
              self.n_total_chunks,
              &p_words,
+diff --git a/src/llama_engine.rs b/src/llama_engine.rs
+index 6f0aa24..87b16ab 100644
+--- a/src/llama_engine.rs
++++ b/src/llama_engine.rs
+@@ -89,7 +89,7 @@ pub fn ensure_loaded(gguf: &str, gpu: usize) -> bool {
+     let Some(so) = so_path() else { return false };
+     // Never unloaded (the old dlopen path never dlclosed either): the Engine keeps raw fn
+     // pointers into the library for the life of the process, so leak it deliberately.
+-    let lib: &'static libloading::Library = match libloading::Library::new(&so) {
++    let lib: &'static libloading::Library = match unsafe { libloading::Library::new(&so) } {
+         Ok(l) => Box::leak(Box::new(l)),
+         Err(e) => {
+             log::warn!("llama engine: load({}) failed: {} — inference unavailable.", so.display(), e);
+diff --git a/src/slm.rs b/src/slm.rs
+index 77fcd6e..84b41d0 100644
+--- a/src/slm.rs
++++ b/src/slm.rs
+@@ -301,7 +301,7 @@ pub fn probe_gpu_inference() -> GpuProbe {
+     // Windows nvcc links cudart statically into keryx-llama.dll, so only cuBLAS is probed.
+     // Each probe Library is dropped immediately — we only care that it CAN load; the
+     // engine (re-)loads it for real later, and the OS loader refcounts it.
+-    let loads = |candidates: &[&str]| candidates.iter().any(|so| libloading::Library::new(so).is_ok());
++    let loads = |candidates: &[&str]| candidates.iter().any(|so| unsafe { libloading::Library::new(so) }.is_ok());
+     #[cfg(windows)]
+     let ok = loads(&["cublas64_12.dll"]);
+     #[cfg(not(windows))]

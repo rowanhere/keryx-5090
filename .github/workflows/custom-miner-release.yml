@@ -38,9 +38,8 @@ jobs:
                 cmake \
                 unzip \
                 zip
-              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.85.0
+              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
               export PATH="$HOME/.cargo/bin:$PATH"
-              rustup default 1.85.0
               export CARGO_PROFILE_RELEASE_LTO=false
               export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
               rustc --version
