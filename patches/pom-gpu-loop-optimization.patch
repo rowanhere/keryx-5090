@@ -1,0 +1,147 @@
+diff --git a/src/miner.rs b/src/miner.rs
+index 14ee12d..3409cce 100644
+--- a/src/miner.rs
++++ b/src/miner.rs
+@@ -150,12 +150,23 @@ pub fn get_num_cpus(n_cpus: Option<u16>) -> u16 {
+ 
+ const LOG_RATE: Duration = Duration::from_secs(10);
+ const GPU_TELEMETRY_RATE: Duration = Duration::from_secs(10);
++const DEFAULT_POM_BATCH: u64 = 1 << 22;
++const MIN_POM_BATCH: u64 = 1 << 18;
++const MAX_POM_BATCH: u64 = 1 << 25;
+ // Number of consecutive all-zero hashrate ticks (outside an OPoI inference pause)
+ // tolerated before reporting a real stall. A brief run of zeros is normal — model
+ // load/eviction or a gap between block templates — so we wait past this grace window
+ // to avoid scary "stalled or crashed" warnings during routine operation.
+ const STALL_GRACE_TICKS: u32 = 3;
+ 
++fn pom_batch_size() -> u64 {
++    std::env::var("KERYX_POM_BATCH")
++        .ok()
++        .and_then(|value| value.parse::<u64>().ok())
++        .map(|value| value.clamp(MIN_POM_BATCH, MAX_POM_BATCH))
++        .unwrap_or(DEFAULT_POM_BATCH)
++}
++
+ impl MinerManager {
+     pub fn new(send_channel: Sender<BlockSeed>, n_cpus: Option<u16>, manager: &PluginManager, stats: Arc<MinerStats>) -> Self {
+         register_freeze_handler();
+@@ -301,12 +312,11 @@ impl MinerManager {
+                 let mut nonces = vec![0u64; 1];
+ 
+                 let mut state = None;
+-                // PoM mining: nonce cursor + per-launch batch. The kernel grinds the whole batch
+-                // before returning, so BPS_max = hashrate / POM_BATCH. At 1<<22 this capped a
+-                // ~24 MH/s GPU at ~5.8 BPS. 1<<20 lifts the ceiling to ~23 BPS while staying well
+-                // above kernel-launch overhead (batch ≈ 43 ms at 24 MH/s).
++                // PoM mining: nonce cursor + per-launch batch. Fast GPUs otherwise burn too much
++                // time in launch/sync/host bookkeeping. Keep this tunable so operators can balance
++                // latency versus throughput on future cards without rebuilding.
+                 let mut pom_nonce: u64 = thread_rng().next_u64();
+-                const POM_BATCH: u64 = 1 << 20;
++                let pom_batch = pom_batch_size();
+ 
+                 loop {
+                     nonces[0] = 0;
+@@ -351,10 +361,10 @@ impl MinerManager {
+                             keryx_miner::pom_gpu::ensure_installed(worker_device_id, daa);
+                         }
+                         let h3 = daa >= keryx_miner::pom::POM_LEVEL_ACTIVATION_DAA;
+-                        let found = keryx_miner::pom_gpu::mine(worker_device_id, &pph, time, &target_le, pom_nonce, POM_BATCH, h3);
+-                        pom_nonce = pom_nonce.wrapping_add(POM_BATCH);
+-                        hashes_tried.fetch_add(POM_BATCH, Ordering::AcqRel);
+-                        worker_hashes_tried.fetch_add(POM_BATCH, Ordering::AcqRel);
++                        let found = keryx_miner::pom_gpu::mine(worker_device_id, &pph, time, &target_le, pom_nonce, pom_batch, h3);
++                        pom_nonce = pom_nonce.wrapping_add(pom_batch);
++                        hashes_tried.fetch_add(pom_batch, Ordering::AcqRel);
++                        worker_hashes_tried.fetch_add(pom_batch, Ordering::AcqRel);
+                         if let Some(nonce) = found {
+                             let built = state.as_ref().and_then(|s| {
+                                 let tier = keryx_miner::pom_gpu::current_tier(worker_device_id, s.daa_score)?;
+diff --git a/src/pom_gpu.rs b/src/pom_gpu.rs
+index a3c0827..366d532 100644
+--- a/src/pom_gpu.rs
++++ b/src/pom_gpu.rs
+@@ -126,6 +126,7 @@ impl LoadedPomKernel {
+         stream: &Arc<CudaStream>,
+         bases_dev: &CudaSlice<u64>,
+         prefix_dev: &CudaSlice<u64>,
++        winner_dev: &CudaSlice<u64>,
+         t_count: u32,
+         n_total_chunks: u64,
+         p_words: &[u64; 4],
+@@ -136,13 +137,13 @@ impl LoadedPomKernel {
+     ) -> Result<Option<u64>> {
+         let t = words4(target_le);
+         let k = crate::pom::POM_WALK_STEPS;
+-        let winner = stream.clone_htod(&[u64::MAX])?;
+         let grid = ((batch + 255) / 256) as u32;
+         let cfg = LaunchConfig { grid_dim: (grid, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+ 
+         let (bases_ptr, _bases_guard) = bases_dev.device_ptr(stream);
+         let (prefix_ptr, _prefix_guard) = prefix_dev.device_ptr(stream);
+-        let (winner_ptr, _winner_guard) = winner.device_ptr(stream);
++        let (winner_ptr, _winner_guard) = winner_dev.device_ptr(stream);
++        unsafe { result::memcpy_htod_sync(winner_ptr, &[u64::MAX]) }?;
+ 
+         let mut params: [*mut c_void; 17] = [
+             (&bases_ptr as *const _ as *mut c_void),
+@@ -167,7 +168,9 @@ impl LoadedPomKernel {
+         unsafe { result::launch_kernel(self.function, cfg.grid_dim, cfg.block_dim, cfg.shared_mem_bytes, stream.cu_stream(), &mut params) }?;
+         stream.synchronize()?;
+ 
+-        let w = stream.clone_dtoh(&winner)?[0];
++        let mut winner = [u64::MAX];
++        unsafe { result::memcpy_dtoh_sync(&mut winner, winner_ptr) }?;
++        let w = winner[0];
+         Ok(if w == u64::MAX { None } else { Some(w) })
+     }
+ }
+@@ -345,6 +348,7 @@ pub struct PomGpuMiner {
+     kernel: LoadedPomKernel,
+     bases_dev: CudaSlice<u64>,
+     prefix_dev: CudaSlice<u64>,
++    winner_dev: CudaSlice<u64>,
+     t_count: u32,
+     n_total_chunks: u64,
+     _uploads: Vec<CudaSlice<u8>>, // tensors we uploaded ourselves, kept alive for the gather
+@@ -389,6 +393,7 @@ impl PomGpuMiner {
+ 
+         let bases_dev = stream.clone_htod(bases.as_slice())?;
+         let prefix_dev = stream.clone_htod(prefix.as_slice())?;
++        let winner_dev = stream.clone_htod(&[u64::MAX])?;
+         // Load the best prebuilt module for this card and keep the raw CUfunction cached.
+         let kernel = select_pom_kernel(device_id)?;
+ 
+@@ -398,6 +403,7 @@ impl PomGpuMiner {
+             kernel,
+             bases_dev,
+             prefix_dev,
++            winner_dev,
+             t_count: bases.len() as u32,
+             n_total_chunks,
+             _uploads: uploads,
+@@ -474,6 +480,7 @@ impl PomGpuMiner {
+ 
+         let bases_dev = stream.clone_htod(bases.as_slice())?;
+         let prefix_dev = stream.clone_htod(prefix.as_slice())?;
++        let winner_dev = stream.clone_htod(&[u64::MAX])?;
+         let kernel = select_pom_kernel(device_id)?;
+ 
+         Ok(Self {
+@@ -482,6 +489,7 @@ impl PomGpuMiner {
+             kernel,
+             bases_dev,
+             prefix_dev,
++            winner_dev,
+             t_count: bases.len() as u32,
+             n_total_chunks,
+             _uploads: uploads,
+@@ -504,6 +512,7 @@ impl PomGpuMiner {
+             &self.stream,
+             &self.bases_dev,
+             &self.prefix_dev,
++            &self.winner_dev,
+             self.t_count,
+             self.n_total_chunks,
+             &p_words,
