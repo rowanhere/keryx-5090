@@ -12,7 +12,9 @@ ASYNC_WORKERS="${KERYX_ASYNC_WORKERS:-4}"
 STATS_BIND="${KERYX_STATS_BIND:-127.0.0.1}"
 STATS_PORT="${KERYX_STATS_PORT:-3338}"
 
-./optimize-gpus.sh >/dev/null 2>&1 || true
+if [ "${KERYX_GPU_TUNE:-0}" = "1" ]; then
+  ./optimize-gpus.sh >/dev/null 2>&1 || true
+fi
 
 KERYX_ASYNC_WORKERS="$ASYNC_WORKERS" \
 KERYX_POM_BATCH="$POM_BATCH" \

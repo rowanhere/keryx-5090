@@ -10,6 +10,7 @@ Ready-to-use wrapper pack for the official Keryx miner release, tuned for a 4x R
 - Models: `/root/keryx-models`
 - CUDA workload: `8192`
 - PoM batch: `4194304` when using a custom miner build with `KERYX_POM_BATCH`
+- GPU tuning: off by default; set `KERYX_GPU_TUNE=1` to apply clocks/power limits
 - Stats API: `127.0.0.1:3338`
 
 ## Install On GPU Host
@@ -72,6 +73,7 @@ source ./best-workload.env
 KERYX_CUDA_WORKLOAD=3072 ./run-light.sh
 KERYX_CUDA_WORKLOAD=12288 ./run-light.sh
 KERYX_POM_BATCH=8388608 ./run-light.sh
+KERYX_GPU_TUNE=1 ./run-light.sh
 KERYX_POWER_LIMIT=450 ./run-light.sh
 KERYX_CLOCK_RANGE=2700,3300 ./run-light.sh
 KERYX_NODE=grpc://YOUR_NODE:22110 ./run-light.sh
