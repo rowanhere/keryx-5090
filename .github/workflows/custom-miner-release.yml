@@ -49,16 +49,23 @@ jobs:
               cd miner-src
               git checkout v0.3.7-OPoI
               git apply ../patches/pom-gpu-loop-optimization.patch
-              cargo build --release -p keryx-miner -p keryxcuda
+              cargo build --release -p keryx-miner
             '
 
       - name: Package
         shell: bash
         run: |
           set -eux
+          curl -L -o official.zip \
+            https://github.com/Keryx-Labs/keryx-miner/releases/download/v0.3.7-OPoI/keryx-miner-v0.3.7-OPoI-linux-gnu-amd64.zip
+          rm -rf official
+          mkdir official
+          unzip -q official.zip -d official
+          OFFICIAL_DIR="$(dirname "$(find official -type f -name keryx-miner | head -1)")"
+
           mkdir -p pack
+          cp "$OFFICIAL_DIR"/* pack/
           cp miner-src/target/release/keryx-miner pack/
-          find miner-src/target/release -maxdepth 1 -type f -name 'libkeryx*.so' -exec cp {} pack/ \;
           cp run-light.sh run-light-max.sh autotune-light.sh optimize-gpus.sh download-light-model.sh README.md pack/
           chmod +x pack/keryx-miner pack/*.sh
           cd pack
