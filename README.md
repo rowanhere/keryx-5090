@@ -8,7 +8,7 @@ Ready-to-use wrapper pack for the official Keryx miner release, tuned for a 4x R
 - Wallet: `keryx:qqflxjrsvlycdl8ytd2v6xrna6aj8hny0jkprw92wa9c4fxsun0w7n9npdne6`
 - Tier: `--light`
 - Models: `/root/keryx-models`
-- CUDA workload: `4096`
+- CUDA workload: `8192`
 - Stats API: `127.0.0.1:3338`
 
 ## Install On GPU Host
@@ -28,10 +28,33 @@ cd /root/keryx-5090-miner-pack
 ./run-light.sh
 ```
 
+For the most aggressive preset:
+
+```bash
+./run-light-max.sh
+```
+
+To apply GPU power/clock tuning only:
+
+```bash
+./optimize-gpus.sh
+```
+
+For real tuning on the rented GPU box:
+
+```bash
+./autotune-light.sh
+source ./best-workload.env
+./run-light.sh
+```
+
 ## Override Settings
 
 ```bash
 KERYX_CUDA_WORKLOAD=3072 ./run-light.sh
+KERYX_CUDA_WORKLOAD=12288 ./run-light.sh
+KERYX_POWER_LIMIT=450 ./run-light.sh
+KERYX_CLOCK_RANGE=2700,3300 ./run-light.sh
 KERYX_NODE=grpc://YOUR_NODE:22110 ./run-light.sh
 KERYX_STATS_BIND=0.0.0.0 ./run-light.sh
 ```
@@ -39,7 +62,7 @@ KERYX_STATS_BIND=0.0.0.0 ./run-light.sh
 If the miner prints `Cuda takes longer then block rate`, lower workload:
 
 ```text
-4096 -> 3072 -> 2560 -> 2048
+16384 -> 14336 -> 12288 -> 10240 -> 8192 -> 6144 -> 4096
 ```
 
 ## Model Folder

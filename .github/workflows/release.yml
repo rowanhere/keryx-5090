@@ -24,7 +24,7 @@ jobs:
           unzip -q official.zip -d official
           MINER_DIR="$(dirname "$(find official -type f -name keryx-miner | head -1)")"
           cp "$MINER_DIR"/* pack/
-          cp run-light.sh download-light-model.sh README.md pack/
+          cp run-light.sh run-light-max.sh autotune-light.sh optimize-gpus.sh download-light-model.sh README.md pack/
           chmod +x pack/keryx-miner pack/*.sh
 
       - name: Package
@@ -43,4 +43,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: keryx-5090-miner-pack-linux-amd64.zip
-
