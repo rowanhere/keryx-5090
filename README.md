@@ -18,7 +18,7 @@ apt update
 apt install -y curl unzip ca-certificates libgomp1
 
 curl -L -o keryx-5090-miner-pack.zip \
-  https://github.com/YOUR_USER/keryx-5090-miner-pack/releases/latest/download/keryx-5090-miner-pack-linux-amd64.zip
+  https://github.com/rowanhere/keryx-5090/releases/latest/download/keryx-5090-miner-pack-linux-amd64.zip
 
 rm -rf /root/keryx-5090-miner-pack
 mkdir -p /root/keryx-5090-miner-pack
@@ -55,4 +55,3 @@ Download from:
 ```text
 https://keryx-labs.com/Mistral-7B-v0.3.zip
 ```
-
