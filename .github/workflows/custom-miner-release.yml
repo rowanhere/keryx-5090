@@ -12,44 +12,45 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    container:
-      image: nvidia/cuda:12.8.1-devel-ubuntu24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          set -eux
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            ca-certificates \
-            curl \
-            git \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            protobuf-compiler \
-            clang \
-            cmake \
-            unzip \
-            zip
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build patched miner
         shell: bash
         run: |
           set -eux
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustc --version
-          cargo --version
-          nvcc --version
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            nvidia/cuda:12.8.1-devel-ubuntu24.04 \
+            bash -lc '
+              set -eux
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                ca-certificates \
+                curl \
+                git \
+                build-essential \
+                pkg-config \
+                libssl-dev \
+                protobuf-compiler \
+                clang \
+                cmake \
+                unzip \
+                zip
+              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+              export PATH="$HOME/.cargo/bin:$PATH"
+              rustc --version
+              cargo --version
+              nvcc --version
 
-          git clone https://github.com/Keryx-Labs/keryx-miner.git miner-src
-          cd miner-src
-          git checkout v0.3.7-OPoI
-          git apply ../patches/pom-gpu-loop-optimization.patch
-          cargo build --release
+              rm -rf miner-src
+              git clone https://github.com/Keryx-Labs/keryx-miner.git miner-src
+              cd miner-src
+              git checkout v0.3.7-OPoI
+              git apply ../patches/pom-gpu-loop-optimization.patch
+              cargo build --release
+            '
 
       - name: Package
         shell: bash
