@@ -9,7 +9,8 @@ Ready-to-use wrapper pack for the official Keryx miner release, tuned for a 4x R
 - Tier: `--light`
 - Models: `/root/keryx-models`
 - CUDA workload: `8192`
-- PoM batch: `4194304` when using a custom miner build with `KERYX_POM_BATCH`
+- PoM batch: `1048576` for low template latency
+- PoM CUDA block: `256` threads, tunable with `KERYX_POM_THREADS`
 - GPU tuning: off by default; set `KERYX_GPU_TUNE=1` to apply clocks/power limits
 - Stats API: `127.0.0.1:3338`
 
@@ -32,8 +33,9 @@ cd /root/keryx-5090-miner-pack
 
 ## Custom Patched Miner
 
-The custom release applies `patches/pom-gpu-loop-optimization.patch` to the official miner source
-and builds a Linux binary with `KERYX_POM_BATCH` support.
+The custom release builds the official miner source with a native RTX 5090 `sm_120` PoM kernel.
+It replaces repeated 64-bit divisions in the model walk with an exact reciprocal remainder,
+uses aligned 32-byte model reads, and exposes the launch geometry for tuning.
 
 ```bash
 curl -L -o keryx-5090-custom-miner.zip \
@@ -44,13 +46,13 @@ mkdir -p /root/keryx-5090-custom-miner
 unzip -q keryx-5090-custom-miner.zip -d /root/keryx-5090-custom-miner
 cd /root/keryx-5090-custom-miner
 
-KERYX_POM_BATCH=8388608 ./run-light.sh
+./run-light-max.sh
 ```
 
-For the most aggressive preset:
+Confirm the optimized kernel was selected:
 
 ```bash
-./run-light-max.sh
+grep -E "native sm_120|PoM CUDA launch" /root/.keryx/stderr.log
 ```
 
 To apply GPU power/clock tuning only:
@@ -59,12 +61,13 @@ To apply GPU power/clock tuning only:
 ./optimize-gpus.sh
 ```
 
-For real tuning on the rented GPU box:
+Tune the actual PoM kernel on the rented GPU box (about 10 minutes):
 
 ```bash
-./autotune-light.sh
-source ./best-workload.env
-./run-light.sh
+pkill -INT keryx-miner || true
+./autotune-pom.sh
+source ./best-pom.env
+./run-light-max.sh
 ```
 
 ## Override Settings
@@ -72,10 +75,10 @@ source ./best-workload.env
 ```bash
 KERYX_CUDA_WORKLOAD=3072 ./run-light.sh
 KERYX_CUDA_WORKLOAD=12288 ./run-light.sh
-KERYX_POM_BATCH=8388608 ./run-light.sh
+KERYX_POM_BATCH=1048576 KERYX_POM_THREADS=256 ./run-light.sh
 KERYX_GPU_TUNE=1 ./run-light.sh
 KERYX_POWER_LIMIT=450 ./run-light.sh
-KERYX_CLOCK_RANGE=2700,3300 ./run-light.sh
+KERYX_CLOCK_MIN=2400 ./run-light.sh
 KERYX_NODE=grpc://YOUR_NODE:22110 ./run-light.sh
 KERYX_STATS_BIND=0.0.0.0 ./run-light.sh
 ```

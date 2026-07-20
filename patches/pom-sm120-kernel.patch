@@ -1,0 +1,220 @@
+diff --git a/build.rs b/build.rs
+index ac104b2..3092c12 100644
+--- a/build.rs
++++ b/build.rs
+@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     });
+     {
+         let out_dir = env::var("OUT_DIR").unwrap();
+-        let sm_list = env::var("POM_SM_LIST").unwrap_or_else(|_| "90,89,86,80,75,70,61".to_string());
++        let sm_list = env::var("POM_SM_LIST").unwrap_or_else(|_| "120,90,89,86,80,75,70,61".to_string());
+         let sms: Vec<String> = sm_list
+             .split(',')
+             .map(str::trim)
+@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+             .collect();
+         assert!(!sms.is_empty(), "POM_SM_LIST resolved to an empty set");
+ 
+-        for sm in sms {
++        for sm in &sms {
+             let ptx = format!("{out_dir}/pom_mine_sm{sm}.ptx");
+             let output = std::process::Command::new(&nvcc)
+                 .args(["-ptx", "-O3", &format!("-arch=sm_{sm}"), "cuda/pom_mine.cu", "-o", &ptx])
+@@ -55,6 +55,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+             }
+         }
+ 
++        // CUDA 12.8 knows Blackwell's sm_120 ISA. Embed native SASS for RTX 5090 so the
++        // runtime does not silently select the older generic nextgen fatbin.
++        if sms.iter().any(|sm| sm == "120") {
++            let cubin = format!("{out_dir}/pom_mine_sm120.cubin");
++            let output = std::process::Command::new(&nvcc)
++                .args([
++                    "-cubin",
++                    "-O3",
++                    "-arch=sm_120",
++                    "-Xptxas=-O3",
++                    "cuda/pom_mine.cu",
++                    "-o",
++                    &cubin,
++                ])
++                .output()
++                .unwrap_or_else(|e| panic!("nvcc ({nvcc}) failed to run for sm_120 cubin: {e}"));
++            if !output.status.success() {
++                let stderr = String::from_utf8_lossy(&output.stderr);
++                panic!("nvcc failed to compile native sm_120 cubin:\n{}", stderr);
++            }
++        }
++
+         // Optional prebuilt fatbins: staged into OUT_DIR so runtime can embed/package them now,
+         // then start loading them in a follow-up refactor.
+         let legacy_src = env::var("POM_FATBIN_LEGACY")
+diff --git a/cuda/pom_mine.cu b/cuda/pom_mine.cu
+index 93577b7..e9933a2 100644
+--- a/cuda/pom_mine.cu
++++ b/cuda/pom_mine.cu
+@@ -4,6 +4,7 @@
+ // pom-q4-probe::pom_mine. The seed/pow folds MUST match the host (src/pom.rs build_proof).
+ 
+ #include <cstdint>
++#include <climits>
+ 
+ __device__ __forceinline__ unsigned long long mix64(unsigned long long x) {
+     x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+@@ -39,32 +40,50 @@ __device__ __forceinline__ bool pom_le_leq(const unsigned long long a[4],
+     return a[0] <= b0;
+ }
+ 
+-extern "C" __global__ void pom_mine(const unsigned long long* bases, const unsigned long long* prefix,
++// Exact x % divisor using a reciprocal shared by the whole CUDA block. With
++// reciprocal=floor((2^64-1)/divisor), the estimated quotient is at most one low.
++__device__ __forceinline__ unsigned long long pom_fast_mod(
++    unsigned long long x, unsigned long long divisor, unsigned long long reciprocal) {
++    unsigned long long q = __umul64hi(x, reciprocal);
++    unsigned long long r = x - q * divisor;
++    return r >= divisor ? r - divisor : r;
++}
++
++extern "C" __global__ void pom_mine(const unsigned long long* __restrict__ bases,
++                                    const unsigned long long* __restrict__ prefix,
+                                     unsigned int T, unsigned long long n_total_chunks, unsigned int K,
+                                     unsigned long long p0, unsigned long long p1, unsigned long long p2, unsigned long long p3,
+                                     unsigned long long time_,
+                                     unsigned long long t0, unsigned long long t1, unsigned long long t2, unsigned long long t3,
+                                     unsigned long long nonce_base, unsigned long long n_nonces,
+-                                    unsigned long long* winner) {
++                                    unsigned long long* __restrict__ winner) {
++    __shared__ unsigned long long modulus_reciprocal;
++    if (threadIdx.x == 0) {
++        modulus_reciprocal = ULLONG_MAX / n_total_chunks;
++    }
++    __syncthreads();
++
+     unsigned long long tid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+     if (tid >= n_nonces) return;
+     unsigned long long nonce = nonce_base + tid;
+ 
+     unsigned long long state = pom_seed_fold(nonce, time_, p0, p1, p2, p3);
+-    unsigned long long off = state % n_total_chunks;
++    unsigned long long off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
+     for (unsigned int i = 0; i < K; i++) {
+         unsigned int lo = 0, hi = T;
+         while (lo + 1 < hi) {
+             unsigned int mid = (lo + hi) >> 1;
+-            if (prefix[mid] <= off) lo = mid; else hi = mid;
++            const bool move_right = __ldg(prefix + mid) <= off;
++            lo = move_right ? mid : lo;
++            hi = move_right ? hi : mid;
+         }
+         unsigned long long local = off - prefix[lo];
+-        const unsigned long long* p = (const unsigned long long*)bases[lo];
++        const unsigned long long* p = (const unsigned long long*)__ldg(bases + lo);
+         unsigned long long base = local * 4ULL;
+-        unsigned long long h = state;
+-        h ^= p[base]; h ^= p[base + 1]; h ^= p[base + 2]; h ^= p[base + 3];
++        const ulonglong4 chunk = *reinterpret_cast<const ulonglong4*>(p + base);
++        unsigned long long h = state ^ chunk.x ^ chunk.y ^ chunk.z ^ chunk.w;
+         state = mix64(h);
+-        off = state % n_total_chunks;
++        off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
+     }
+     unsigned long long pv[4];
+     pom_pow_fold(state, p0, p1, p2, p3, pv);
+diff --git a/src/miner.rs b/src/miner.rs
+index 3409cce..565eee3 100644
+--- a/src/miner.rs
++++ b/src/miner.rs
+@@ -150,9 +150,9 @@ pub fn get_num_cpus(n_cpus: Option<u16>) -> u16 {
+ 
+ const LOG_RATE: Duration = Duration::from_secs(10);
+ const GPU_TELEMETRY_RATE: Duration = Duration::from_secs(10);
+-const DEFAULT_POM_BATCH: u64 = 1 << 22;
++const DEFAULT_POM_BATCH: u64 = 1 << 20;
+ const MIN_POM_BATCH: u64 = 1 << 18;
+-const MAX_POM_BATCH: u64 = 1 << 25;
++const MAX_POM_BATCH: u64 = 1 << 23;
+ // Number of consecutive all-zero hashrate ticks (outside an OPoI inference pause)
+ // tolerated before reporting a real stall. A brief run of zeros is normal — model
+ // load/eviction or a gap between block templates — so we wait past this grace window
+diff --git a/src/pom_gpu.rs b/src/pom_gpu.rs
+index 366d532..1bb7b0b 100644
+--- a/src/pom_gpu.rs
++++ b/src/pom_gpu.rs
+@@ -20,6 +20,8 @@ use log::{info, warn};
+ 
+ use cudarc::driver::{result, sys, CudaContext, CudaSlice, CudaStream, DevicePtr, LaunchConfig};
+ 
++const CUBIN_SM120: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pom_mine_sm120.cubin"));
++const PTX_SM120: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm120.ptx"));
+ const PTX_SM90: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm90.ptx"));
+ const PTX_SM89: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm89.ptx"));
+ const PTX_SM86: &str = include_str!(concat!(env!("OUT_DIR"), "/pom_mine_sm86.ptx"));
+@@ -32,7 +34,8 @@ const FATBIN_NEXTGEN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pom_mine
+ const CHUNK_BYTES: usize = 32;
+ const POM_KERNEL_NAME: &str = "pom_mine";
+ 
+-const POM_PTX_CANDIDATES: [(&str, &str, &str); 7] = [
++const POM_PTX_CANDIDATES: [(&str, &str, &str); 8] = [
++    ("pom_mine_mod_sm120", "sm_120", PTX_SM120),
+     ("pom_mine_mod_sm90", "sm_90", PTX_SM90),
+     ("pom_mine_mod_sm89", "sm_89", PTX_SM89),
+     ("pom_mine_mod_sm86", "sm_86", PTX_SM86),
+@@ -137,8 +140,11 @@ impl LoadedPomKernel {
+     ) -> Result<Option<u64>> {
+         let t = words4(target_le);
+         let k = crate::pom::POM_WALK_STEPS;
+-        let grid = ((batch + 255) / 256) as u32;
+-        let cfg = LaunchConfig { grid_dim: (grid, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
++        let threads = pom_threads_per_block();
++        static CONFIG_LOGGED: Once = Once::new();
++        CONFIG_LOGGED.call_once(|| info!("PoM CUDA launch: threads={}, batch={}", threads, batch));
++        let grid = batch.div_ceil(threads as u64) as u32;
++        let cfg = LaunchConfig { grid_dim: (grid, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+ 
+         let (bases_ptr, _bases_guard) = bases_dev.device_ptr(stream);
+         let (prefix_ptr, _prefix_guard) = prefix_dev.device_ptr(stream);
+@@ -175,6 +181,17 @@ impl LoadedPomKernel {
+     }
+ }
+ 
++fn pom_threads_per_block() -> u32 {
++    static THREADS: OnceLock<u32> = OnceLock::new();
++    *THREADS.get_or_init(|| {
++        std::env::var("KERYX_POM_THREADS")
++            .ok()
++            .and_then(|value| value.parse::<u32>().ok())
++            .filter(|value| matches!(value, 64 | 128 | 256 | 512 | 1024))
++            .unwrap_or(256)
++    })
++}
++
+ fn is_nextgen_device(device_id: usize) -> bool {
+     let Ok(dev) = result::device::get(device_id as i32) else {
+         return false;
+@@ -233,6 +250,26 @@ fn select_pom_kernel(device_id: usize) -> Result<LoadedPomKernel> {
+         }
+     });
+ 
++    let cc = gpu_compute_capability(device_id);
++    if matches!(cc, Some((12, 0))) {
++        match LoadedPomKernel::from_fatbin("native sm_120 cubin", CUBIN_SM120) {
++            Ok(kernel) => {
++                info!("PoM[gpu{} cc12.0]: startup loaded native sm_120 cubin", device_id);
++                set_gpu_kernel_info(device_id, cc, "native sm_120 cubin", "pom_mine_sm120.cubin");
++                return Ok(kernel);
++            }
++            Err(e) => warn!("PoM[gpu{}]: native sm_120 cubin load failed: {}", device_id, e),
++        }
++        match LoadedPomKernel::from_ptx("sm_120", PTX_SM120) {
++            Ok(kernel) => {
++                info!("PoM[gpu{} cc12.0]: startup loaded sm_120 PTX fallback", device_id);
++                set_gpu_kernel_info(device_id, cc, "sm_120 PTX", "pom_mine_sm120.ptx");
++                return Ok(kernel);
++            }
++            Err(e) => warn!("PoM[gpu{}]: sm_120 PTX load failed: {}", device_id, e),
++        }
++    }
++
+     let is_nextgen_cc = is_nextgen_device(device_id);
+ 
+     let fatbin_candidates: [(&str, &str, &[u8]); 2] = if is_nextgen_cc {

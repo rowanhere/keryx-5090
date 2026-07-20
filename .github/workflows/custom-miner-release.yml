@@ -51,6 +51,7 @@ jobs:
               cd miner-src
               git checkout v0.3.7-OPoI
               git apply ../patches/pom-gpu-loop-optimization.patch
+              git apply ../patches/pom-sm120-kernel.patch
               printf "\n[profile.fast-release]\n" >> Cargo.toml
               printf "inherits = \"release\"\n" >> Cargo.toml
               printf "lto = false\n" >> Cargo.toml
@@ -75,7 +76,7 @@ jobs:
           mkdir -p pack
           cp "$OFFICIAL_DIR"/* pack/
           cp miner-src/target/fast-release/keryx-miner pack/
-          cp run-light.sh run-light-max.sh autotune-light.sh optimize-gpus.sh download-light-model.sh README.md pack/
+          cp run-light.sh run-light-max.sh autotune-light.sh autotune-pom.sh optimize-gpus.sh download-light-model.sh README.md pack/
           chmod +x pack/keryx-miner pack/*.sh
           cd pack
           zip -r ../keryx-5090-custom-miner-linux-amd64.zip .
