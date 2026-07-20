@@ -1,0 +1,130 @@
+diff --git a/cuda/pom_mine.cu b/cuda/pom_mine.cu
+index e9933a2..37522b8 100644
+--- a/cuda/pom_mine.cu
++++ b/cuda/pom_mine.cu
+@@ -69,6 +69,14 @@ extern "C" __global__ void pom_mine(const unsigned long long* __restrict__ bases
+ 
+     unsigned long long state = pom_seed_fold(nonce, time_, p0, p1, p2, p3);
+     unsigned long long off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
++    if (T == 1) {
++        const unsigned long long* p = (const unsigned long long*)__ldg(bases);
++        for (unsigned int i = 0; i < K; i++) {
++            const ulonglong4 chunk = *reinterpret_cast<const ulonglong4*>(p + off * 4ULL);
++            state = mix64(state ^ chunk.x ^ chunk.y ^ chunk.z ^ chunk.w);
++            off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
++        }
++    } else {
+     for (unsigned int i = 0; i < K; i++) {
+         unsigned int lo = 0, hi = T;
+         while (lo + 1 < hi) {
+@@ -85,6 +93,7 @@ extern "C" __global__ void pom_mine(const unsigned long long* __restrict__ bases
+         state = mix64(h);
+         off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
+     }
++    }
+     unsigned long long pv[4];
+     pom_pow_fold(state, p0, p1, p2, p3, pv);
+     if (pom_le_leq(pv, t0, t1, t2, t3)) {
+diff --git a/src/pom_gpu.rs b/src/pom_gpu.rs
+index 1bb7b0b..50fb89e 100644
+--- a/src/pom_gpu.rs
++++ b/src/pom_gpu.rs
+@@ -192,6 +192,16 @@ fn pom_threads_per_block() -> u32 {
+     })
+ }
+ 
++fn force_contiguous_raw() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        std::env::var("KERYX_POM_CONTIGUOUS")
++            .ok()
++            .map(|value| !matches!(value.as_str(), "0" | "false" | "off"))
++            .unwrap_or(false)
++    })
++}
++
+ fn is_nextgen_device(device_id: usize) -> bool {
+     let Ok(dev) = result::device::get(device_id as i32) else {
+         return false;
+@@ -406,30 +416,40 @@ impl PomGpuMiner {
+         let meta = crate::gguf::GgufMeta::read(&mut file)?;
+         let names = meta.sorted_names(); // canonical order — matches pom-rt-builder / the node R_T
+ 
+-        let mut uploads: Vec<CudaSlice<u8>> = Vec::with_capacity(names.len());
+-        let mut bases: Vec<u64> = Vec::new();
+-        let mut prefix: Vec<u64> = vec![0];
+-        let mut host_buf: Vec<u8> = Vec::new();
++        let total_bytes = names.iter().try_fold(0usize, |total, name| {
++            let chunks = meta.tensors[name].nbytes / CHUNK_BYTES as u64;
++            let bytes = usize::try_from(chunks * CHUNK_BYTES as u64)
++                .map_err(|_| anyhow!("PoM GPU: canonical model size exceeds host address space"))?;
++            total.checked_add(bytes).ok_or_else(|| anyhow!("PoM GPU: canonical model size overflow"))
++        })?;
++        let mut host_blob = Vec::with_capacity(total_bytes);
++        let mut n_total_chunks = 0u64;
+         for name in &names {
+             let t = &meta.tensors[name];
+             let chunks = t.nbytes / CHUNK_BYTES as u64;
+             if chunks == 0 {
+                 continue;
+             }
+-            host_buf.resize(t.nbytes as usize, 0);
+-            crate::pom::read_exact_at(&file, &mut host_buf, meta.tensor_data_offset + t.offset)?;
+-            let dev = stream.clone_htod(host_buf.as_slice())?;
+-            bases.push(dev.device_ptr(&stream).0 as u64);
+-            uploads.push(dev);
+-            prefix.push(prefix.last().unwrap() + chunks);
++            let bytes = (chunks * CHUNK_BYTES as u64) as usize;
++            let start = host_blob.len();
++            host_blob.resize(start + bytes, 0);
++            crate::pom::read_exact_at(&file, &mut host_blob[start..], meta.tensor_data_offset + t.offset)?;
++            n_total_chunks += chunks;
+         }
+-        let n_total_chunks = *prefix.last().unwrap();
+         if n_total_chunks == 0 {
+             return Err(anyhow!("PoM GPU: model produced 0 chunks"));
+         }
+ 
+-        let bases_dev = stream.clone_htod(bases.as_slice())?;
+-        let prefix_dev = stream.clone_htod(prefix.as_slice())?;
++        let upload = stream.clone_htod(host_blob.as_slice())?;
++        let bases = [upload.device_ptr(&stream).0 as u64];
++        let prefix = [0, n_total_chunks];
++        info!(
++            "PoM[gpu{}]: contiguous canonical upload ready - {} bytes, N={} chunks",
++            device_id, total_bytes, n_total_chunks
++        );
++
++        let bases_dev = stream.clone_htod(&bases)?;
++        let prefix_dev = stream.clone_htod(&prefix)?;
+         let winner_dev = stream.clone_htod(&[u64::MAX])?;
+         // Load the best prebuilt module for this card and keep the raw CUfunction cached.
+         let kernel = select_pom_kernel(device_id)?;
+@@ -441,9 +461,9 @@ impl PomGpuMiner {
+             bases_dev,
+             prefix_dev,
+             winner_dev,
+-            t_count: bases.len() as u32,
++            t_count: 1,
+             n_total_chunks,
+-            _uploads: uploads,
++            _uploads: vec![upload],
+         })
+     }
+ 
+@@ -823,8 +843,13 @@ fn ensure_installed_inner(device_id: u32, daa: u64) -> bool {
+     // handler can banlist + downgrade instead of crashing the mining thread or hot-spinning on a
+     // model that doesn't fit this GPU.
+     let inference_gpu = device_for_model(&model_id).unwrap_or(0);
+-    let mut use_llama =
+-        device_id == inference_gpu && crate::llama_engine::ensure_loaded(&gguf, device_id as usize);
++    let contiguous = force_contiguous_raw();
++    let mut use_llama = !contiguous
++        && device_id == inference_gpu
++        && crate::llama_engine::ensure_loaded(&gguf, device_id as usize);
++    if contiguous {
++        info!("PoM[gpu{}]: forcing contiguous raw model layout", device_id);
++    }
+     // BYTE-COMPAT GATE: llama.cpp repacks some architectures on load (e.g. tied embeddings
+     // materialise a separate output.weight), so its resident chunk count differs from the
+     // canonical GGUF the walk MUST gather and R_T pins. When that happens the zero-dup walk is

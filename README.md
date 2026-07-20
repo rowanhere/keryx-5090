@@ -38,6 +38,11 @@ It replaces repeated 64-bit divisions in the model walk with an exact reciprocal
 uses aligned 32-byte model reads, and exposes the launch geometry for tuning. The executable and
 CUDA plugin are built together because the miner's Rust plugin ABI is build-specific.
 
+For the light-tier 5090 path, `KERYX_POM_CONTIGUOUS=1` uploads canonical model chunks as one
+contiguous VRAM allocation. This removes the tensor-prefix binary search from every PoM walk step.
+It uses an additional raw model copy on the inference GPU; disable it with
+`KERYX_POM_CONTIGUOUS=0` if VRAM pressure matters more than mining throughput.
+
 ```bash
 curl -L -o keryx-5090-custom-miner.zip \
   https://github.com/rowanhere/keryx-5090/releases/latest/download/keryx-5090-custom-miner-linux-amd64.zip
@@ -77,6 +82,7 @@ source ./best-pom.env
 KERYX_CUDA_WORKLOAD=3072 ./run-light.sh
 KERYX_CUDA_WORKLOAD=12288 ./run-light.sh
 KERYX_POM_BATCH=1048576 KERYX_POM_THREADS=256 ./run-light.sh
+KERYX_POM_CONTIGUOUS=0 ./run-light.sh
 KERYX_GPU_TUNE=1 ./run-light.sh
 KERYX_POWER_LIMIT=450 ./run-light.sh
 KERYX_CLOCK_MIN=2400 ./run-light.sh
