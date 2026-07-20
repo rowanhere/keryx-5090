@@ -59,7 +59,7 @@ jobs:
               printf "incremental = true\n" >> Cargo.toml
               printf "debug = 0\n" >> Cargo.toml
               printf "strip = \"symbols\"\n" >> Cargo.toml
-              cargo build --profile fast-release -p keryx-miner --timings
+              cargo build --profile fast-release -p keryx-miner -p keryxcuda --timings
             '
 
       - name: Package
@@ -75,7 +75,14 @@ jobs:
 
           mkdir -p pack
           cp "$OFFICIAL_DIR"/* pack/
+          # Rust trait-object plugin ABI is build-specific. Never pair the rebuilt executable
+          # with plugins from the official binary release.
+          rm -f pack/libkeryxcuda.so pack/libkeryxopencl.so
           cp miner-src/target/fast-release/keryx-miner pack/
+          cp miner-src/target/fast-release/libkeryxcuda.so pack/
+          if [ -f miner-src/target/fast-release/libkeryx-llama.so ]; then
+            cp miner-src/target/fast-release/libkeryx-llama.so pack/
+          fi
           cp run-light.sh run-light-max.sh autotune-light.sh autotune-pom.sh optimize-gpus.sh download-light-model.sh README.md pack/
           chmod +x pack/keryx-miner pack/*.sh
           cd pack

@@ -35,7 +35,8 @@ cd /root/keryx-5090-miner-pack
 
 The custom release builds the official miner source with a native RTX 5090 `sm_120` PoM kernel.
 It replaces repeated 64-bit divisions in the model walk with an exact reciprocal remainder,
-uses aligned 32-byte model reads, and exposes the launch geometry for tuning.
+uses aligned 32-byte model reads, and exposes the launch geometry for tuning. The executable and
+CUDA plugin are built together because the miner's Rust plugin ABI is build-specific.
 
 ```bash
 curl -L -o keryx-5090-custom-miner.zip \
