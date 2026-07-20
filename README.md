@@ -43,6 +43,10 @@ contiguous VRAM allocation. This removes the tensor-prefix binary search from ev
 It uses an additional raw model copy on the inference GPU; disable it with
 `KERYX_POM_CONTIGUOUS=0` if VRAM pressure matters more than mining throughput.
 
+`KERYX_POM_LANES=1|2|4` selects how many independent nonce walks each CUDA thread
+interleaves. The 5090 wrapper defaults to `2`; benchmark all three because additional
+instruction-level parallelism trades register pressure for better random-read latency hiding.
+
 ```bash
 curl -L -o keryx-5090-custom-miner.zip \
   https://github.com/rowanhere/keryx-5090/releases/latest/download/keryx-5090-custom-miner-linux-amd64.zip
@@ -83,6 +87,7 @@ KERYX_CUDA_WORKLOAD=3072 ./run-light.sh
 KERYX_CUDA_WORKLOAD=12288 ./run-light.sh
 KERYX_POM_BATCH=1048576 KERYX_POM_THREADS=256 ./run-light.sh
 KERYX_POM_CONTIGUOUS=0 ./run-light.sh
+KERYX_POM_LANES=4 ./run-light.sh
 KERYX_GPU_TUNE=1 ./run-light.sh
 KERYX_POWER_LIMIT=450 ./run-light.sh
 KERYX_CLOCK_MIN=2400 ./run-light.sh

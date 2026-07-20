@@ -53,6 +53,7 @@ jobs:
               git apply ../patches/pom-gpu-loop-optimization.patch
               git apply ../patches/pom-sm120-kernel.patch
               git apply ../patches/pom-contiguous-layout.patch
+              git apply ../patches/pom-ilp-kernels.patch
               printf "\n[profile.fast-release]\n" >> Cargo.toml
               printf "inherits = \"release\"\n" >> Cargo.toml
               printf "lto = false\n" >> Cargo.toml

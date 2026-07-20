@@ -1,0 +1,210 @@
+diff --git a/cuda/pom_mine.cu b/cuda/pom_mine.cu
+index 37522b8..e3ecff8 100644
+--- a/cuda/pom_mine.cu
++++ b/cuda/pom_mine.cu
+@@ -49,54 +49,98 @@ __device__ __forceinline__ unsigned long long pom_fast_mod(
+     return r >= divisor ? r - divisor : r;
+ }
+ 
+-extern "C" __global__ void pom_mine(const unsigned long long* __restrict__ bases,
+-                                    const unsigned long long* __restrict__ prefix,
+-                                    unsigned int T, unsigned long long n_total_chunks, unsigned int K,
+-                                    unsigned long long p0, unsigned long long p1, unsigned long long p2, unsigned long long p3,
+-                                    unsigned long long time_,
+-                                    unsigned long long t0, unsigned long long t1, unsigned long long t2, unsigned long long t3,
+-                                    unsigned long long nonce_base, unsigned long long n_nonces,
+-                                    unsigned long long* __restrict__ winner) {
+-    __shared__ unsigned long long modulus_reciprocal;
+-    if (threadIdx.x == 0) {
+-        modulus_reciprocal = ULLONG_MAX / n_total_chunks;
+-    }
+-    __syncthreads();
+-
++template <unsigned int LANES>
++__device__ __forceinline__ void pom_mine_impl(
++    const unsigned long long* __restrict__ bases,
++    const unsigned long long* __restrict__ prefix,
++    unsigned int T, unsigned long long n_total_chunks, unsigned int K,
++    unsigned long long p0, unsigned long long p1, unsigned long long p2, unsigned long long p3,
++    unsigned long long time_,
++    unsigned long long t0, unsigned long long t1, unsigned long long t2, unsigned long long t3,
++    unsigned long long nonce_base, unsigned long long n_nonces,
++    unsigned long long modulus_reciprocal, unsigned long long* __restrict__ winner) {
+     unsigned long long tid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+-    if (tid >= n_nonces) return;
+-    unsigned long long nonce = nonce_base + tid;
++    unsigned long long first = tid * LANES;
++    if (first >= n_nonces) return;
++
++    unsigned long long nonce[LANES];
++    unsigned long long state[LANES];
++    unsigned long long off[LANES];
++#pragma unroll
++    for (unsigned int lane = 0; lane < LANES; lane++) {
++        nonce[lane] = nonce_base + first + lane;
++        state[lane] = pom_seed_fold(nonce[lane], time_, p0, p1, p2, p3);
++        off[lane] = pom_fast_mod(state[lane], n_total_chunks, modulus_reciprocal);
++    }
+ 
+-    unsigned long long state = pom_seed_fold(nonce, time_, p0, p1, p2, p3);
+-    unsigned long long off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
+     if (T == 1) {
+         const unsigned long long* p = (const unsigned long long*)__ldg(bases);
+         for (unsigned int i = 0; i < K; i++) {
+-            const ulonglong4 chunk = *reinterpret_cast<const ulonglong4*>(p + off * 4ULL);
+-            state = mix64(state ^ chunk.x ^ chunk.y ^ chunk.z ^ chunk.w);
+-            off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
++            ulonglong4 chunk[LANES];
++#pragma unroll
++            for (unsigned int lane = 0; lane < LANES; lane++) {
++                chunk[lane] = *reinterpret_cast<const ulonglong4*>(p + off[lane] * 4ULL);
++            }
++#pragma unroll
++            for (unsigned int lane = 0; lane < LANES; lane++) {
++                state[lane] = mix64(state[lane] ^ chunk[lane].x ^ chunk[lane].y ^ chunk[lane].z ^ chunk[lane].w);
++                off[lane] = pom_fast_mod(state[lane], n_total_chunks, modulus_reciprocal);
++            }
+         }
+     } else {
+-    for (unsigned int i = 0; i < K; i++) {
+-        unsigned int lo = 0, hi = T;
+-        while (lo + 1 < hi) {
+-            unsigned int mid = (lo + hi) >> 1;
+-            const bool move_right = __ldg(prefix + mid) <= off;
+-            lo = move_right ? mid : lo;
+-            hi = move_right ? hi : mid;
++        for (unsigned int i = 0; i < K; i++) {
++            ulonglong4 chunk[LANES];
++#pragma unroll
++            for (unsigned int lane = 0; lane < LANES; lane++) {
++                unsigned int lo = 0, hi = T;
++                while (lo + 1 < hi) {
++                    unsigned int mid = (lo + hi) >> 1;
++                    const bool move_right = __ldg(prefix + mid) <= off[lane];
++                    lo = move_right ? mid : lo;
++                    hi = move_right ? hi : mid;
++                }
++                unsigned long long local = off[lane] - prefix[lo];
++                const unsigned long long* p = (const unsigned long long*)__ldg(bases + lo);
++                chunk[lane] = *reinterpret_cast<const ulonglong4*>(p + local * 4ULL);
++            }
++#pragma unroll
++            for (unsigned int lane = 0; lane < LANES; lane++) {
++                state[lane] = mix64(state[lane] ^ chunk[lane].x ^ chunk[lane].y ^ chunk[lane].z ^ chunk[lane].w);
++                off[lane] = pom_fast_mod(state[lane], n_total_chunks, modulus_reciprocal);
++            }
+         }
+-        unsigned long long local = off - prefix[lo];
+-        const unsigned long long* p = (const unsigned long long*)__ldg(bases + lo);
+-        unsigned long long base = local * 4ULL;
+-        const ulonglong4 chunk = *reinterpret_cast<const ulonglong4*>(p + base);
+-        unsigned long long h = state ^ chunk.x ^ chunk.y ^ chunk.z ^ chunk.w;
+-        state = mix64(h);
+-        off = pom_fast_mod(state, n_total_chunks, modulus_reciprocal);
+-    }
+     }
+-    unsigned long long pv[4];
+-    pom_pow_fold(state, p0, p1, p2, p3, pv);
+-    if (pom_le_leq(pv, t0, t1, t2, t3)) {
+-        atomicMin(winner, nonce);
++
++#pragma unroll
++    for (unsigned int lane = 0; lane < LANES; lane++) {
++        if (first + lane < n_nonces) {
++            unsigned long long pv[4];
++            pom_pow_fold(state[lane], p0, p1, p2, p3, pv);
++            if (pom_le_leq(pv, t0, t1, t2, t3)) {
++                atomicMin(winner, nonce[lane]);
++            }
++        }
+     }
+ }
++
++#define POM_KERNEL(name, lanes)                                                                                       \
++extern "C" __global__ void name(const unsigned long long* __restrict__ bases,                                        \
++                                 const unsigned long long* __restrict__ prefix,                                       \
++                                 unsigned int T, unsigned long long n_total_chunks, unsigned int K,                   \
++                                 unsigned long long p0, unsigned long long p1,                                        \
++                                 unsigned long long p2, unsigned long long p3,                                        \
++                                 unsigned long long time_,                                                            \
++                                 unsigned long long t0, unsigned long long t1,                                        \
++                                 unsigned long long t2, unsigned long long t3,                                        \
++                                 unsigned long long nonce_base, unsigned long long n_nonces,                          \
++                                 unsigned long long* __restrict__ winner) {                                            \
++    __shared__ unsigned long long modulus_reciprocal;                                                                 \
++    if (threadIdx.x == 0) modulus_reciprocal = ULLONG_MAX / n_total_chunks;                                           \
++    __syncthreads();                                                                                                  \
++    pom_mine_impl<lanes>(bases, prefix, T, n_total_chunks, K, p0, p1, p2, p3, time_,                                 \
++                         t0, t1, t2, t3, nonce_base, n_nonces, modulus_reciprocal, winner);                           \
++}
++
++POM_KERNEL(pom_mine, 1)
++POM_KERNEL(pom_mine_ilp2, 2)
++POM_KERNEL(pom_mine_ilp4, 4)
+diff --git a/src/pom_gpu.rs b/src/pom_gpu.rs
+index 50fb89e..49ec05c 100644
+--- a/src/pom_gpu.rs
++++ b/src/pom_gpu.rs
+@@ -90,6 +90,7 @@ pub fn list_gpu_kernel_info() -> Vec<GpuKernelInfo> {
+ struct LoadedPomKernel {
+     module: sys::CUmodule,
+     function: sys::CUfunction,
++    nonces_per_thread: u32,
+ }
+ 
+ impl Drop for LoadedPomKernel {
+@@ -113,15 +114,17 @@ impl LoadedPomKernel {
+             return Err(anyhow!("PoM GPU: {} fatbin is empty", label));
+         }
+         let module = unsafe { result::module::load_data(fatbin.as_ptr() as *const c_void) }?;
+-        let function = unsafe { result::module::get_function(module, CString::new(POM_KERNEL_NAME).unwrap()) }?;
+-        Ok(Self { module, function })
++        let (kernel_name, nonces_per_thread) = pom_kernel_variant();
++        let function = unsafe { result::module::get_function(module, CString::new(kernel_name).unwrap()) }?;
++        Ok(Self { module, function, nonces_per_thread })
+     }
+ 
+     fn from_ptx(_label: &'static str, ptx: &'static str) -> Result<Self> {
+         let c_src = CString::new(ptx)?;
+         let module = unsafe { result::module::load_data(c_src.as_ptr() as *const c_void) }?;
+-        let function = unsafe { result::module::get_function(module, CString::new(POM_KERNEL_NAME).unwrap()) }?;
+-        Ok(Self { module, function })
++        let (kernel_name, nonces_per_thread) = pom_kernel_variant();
++        let function = unsafe { result::module::get_function(module, CString::new(kernel_name).unwrap()) }?;
++        Ok(Self { module, function, nonces_per_thread })
+     }
+ 
+     fn launch(
+@@ -142,8 +145,14 @@ impl LoadedPomKernel {
+         let k = crate::pom::POM_WALK_STEPS;
+         let threads = pom_threads_per_block();
+         static CONFIG_LOGGED: Once = Once::new();
+-        CONFIG_LOGGED.call_once(|| info!("PoM CUDA launch: threads={}, batch={}", threads, batch));
+-        let grid = batch.div_ceil(threads as u64) as u32;
++        CONFIG_LOGGED.call_once(|| {
++            info!(
++                "PoM CUDA launch: threads={}, lanes={}, batch={}",
++                threads, self.nonces_per_thread, batch
++            )
++        });
++        let cuda_threads = batch.div_ceil(self.nonces_per_thread as u64);
++        let grid = cuda_threads.div_ceil(threads as u64) as u32;
+         let cfg = LaunchConfig { grid_dim: (grid, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+ 
+         let (bases_ptr, _bases_guard) = bases_dev.device_ptr(stream);
+@@ -181,6 +190,15 @@ impl LoadedPomKernel {
+     }
+ }
+ 
++fn pom_kernel_variant() -> (&'static str, u32) {
++    static VARIANT: OnceLock<(&'static str, u32)> = OnceLock::new();
++    *VARIANT.get_or_init(|| match std::env::var("KERYX_POM_LANES").as_deref() {
++        Ok("2") => ("pom_mine_ilp2", 2),
++        Ok("4") => ("pom_mine_ilp4", 4),
++        _ => (POM_KERNEL_NAME, 1),
++    })
++}
++
+ fn pom_threads_per_block() -> u32 {
+     static THREADS: OnceLock<u32> = OnceLock::new();
+     *THREADS.get_or_init(|| {
